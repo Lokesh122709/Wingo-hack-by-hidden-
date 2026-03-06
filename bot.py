@@ -546,4 +546,186 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 *Welcome, {user.first_name}!*\n\n"
         "🚨 *Note:* Real predictions milengi *sirf tab* jab aap official registration karoge.\n"
         "👇 Click *Register Now* to join 👇"
-   
+    )
+    await update.message.reply_text(welcome, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    user_id = user.id
+    first_name = user.first_name
+    username = user.username or "N/A"
+
+    if query.data == "predict":
+        await query.message.reply_chat_action("typing")
+        pred_type = random.choice(['Big', 'Small'])
+        number = random.randint(1, 100)
+        save_prediction(user_id, first_name, username, pred_type, number)
+        result = f"🎯 *Prediction:*\nType: `{pred_type}`\nNumber: `{number}`"
+        await query.message.reply_text(result, parse_mode=ParseMode.MARKDOWN)
+
+    elif query.data == "about":
+        text = (
+            "🤖 *About This Bot:*\n"
+            "Under 2-3 Lvl Winnings mil Jayegi Bs Lvl Mantion kro.\n"
+            "_Injoy._"
+        )
+        await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    elif query.data == "register":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Click to Register", url=REGISTER_LINK)]
+        ])
+        await query.message.reply_text(
+            "📝 *Registration Required!*\n\n"
+            "Sirf registration ke baad hi aapko real predictions milenge.\n"
+            "👇 Register now 👇",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    elif query.data == "history":
+        history_list = get_user_history(user_id)
+        name, uname = get_user_info(user_id)
+        if history_list:
+            text = f"*🗂 Prediction History for {name} (@{uname}):*\n\n"
+            for i, entry in enumerate(history_list[-10:], 1):
+                text += f"{i}. `{entry['type']}` — `{entry['number']}`\n"
+        else:
+            text = "🚫 *No prediction history found yet.*"
+        await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def k3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(get_k3_prediction(), parse_mode=ParseMode.HTML)
+
+async def server_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch active server and show stats."""
+    global active_server
+    text = update.message.text.split()
+    if len(text) > 1:
+        choice = text[1].lower()
+        if choice == "1" or choice == "server1":
+            active_server = server1
+            await update.message.reply_text(f"✅ Active server switched to **{server1.name}**", parse_mode=ParseMode.MARKDOWN)
+        elif choice == "2" or choice == "server2":
+            active_server = server2
+            await update.message.reply_text(f"✅ Active server switched to **{server2.name}**", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("Usage: /server [1|2]")
+    else:
+        # Show stats for both servers
+        stats1 = server1.get_stats()
+        stats2 = server2.get_stats()
+        msg = (
+            f"**Current active server:** {active_server.name}\n\n"
+            f"**{server1.name}**\n"
+            f"Wins: {stats1['wins']}, Losses: {stats1['losses']}, Accuracy: {stats1['accuracy']:.2f}%\n"
+            f"Predictions sent: {stats1['predictions_sent']}\n\n"
+            f"**{server2.name}**\n"
+            f"Wins: {stats2['wins']}, Losses: {stats2['losses']}, Accuracy: {stats2['accuracy']:.2f}%\n"
+            f"Predictions sent: {stats2['predictions_sent']}\n\n"
+            f"To switch: /server 1 or /server 2"
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle any text message – use OpenAI if available."""
+    if not openai_available or openai_client is None:
+        await update.message.reply_text("AI chat is currently disabled because OpenAI could not be installed. Please try again later.")
+        return
+
+    user_text = update.message.text
+    try:
+        if openai_version == "new":
+            response = openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_text}
+                ]
+            )
+            answer = response.choices[0].message.content
+        else:
+            # old version (0.28.0)
+            response = openai_client.ChatCompletion.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_text}
+                ]
+            )
+            answer = response.choices[0].message.content
+        await update.message.reply_text(answer)
+    except Exception as e:
+        logger.error(f"OpenAI error: {e}")
+        await update.message.reply_text("Kuch galat ho gaya, later try karo.")
+
+# ========== BANNER ==========
+def type_writer(text, delay=0.0009):
+    for ch in text:
+        sys.stdout.write(ch)
+        sys.stdout.flush()
+        time.sleep(delay)
+    print()
+
+def show_banner():
+    output = render('RIZEN X AI', colors=['cyan', 'magenta'], align='center', font='block')
+    for line in output.split("\n"):
+        type_writer(line, 0.001)
+    print(Fore.GREEN + "=" * 70 + Style.RESET_ALL)
+    type_writer(f"{Fore.YELLOW}⚡ Premium Prediction System (Dual Server) ⚡{Style.RESET_ALL}\n", 0.002)
+
+# ========== CHANNEL ACCESS CHECK ==========
+async def check_channel_access(app: Application):
+    """Send a test message to verify channel access."""
+    global channel_accessible
+    try:
+        await app.bot.send_message(chat_id=CHANNEL_ID, text="🔍 Bot is testing channel access...")
+        logger.info("✅ Channel is accessible. Auto‑send enabled.")
+        channel_accessible = True
+    except Exception as e:
+        logger.error(f"❌ Channel access test failed: {e}")
+        logger.warning("⚠️ Auto‑send will be disabled. Please add the bot as an admin to the channel and verify the chat ID.")
+        channel_accessible = False
+
+# ========== MAIN ==========
+async def post_init(app: Application):
+    """Called after application is built but before polling starts."""
+    await check_channel_access(app)
+    # Schedule the periodic task every 2 seconds
+    app.job_queue.run_repeating(periodic_update, interval=2, first=2)
+
+def main():
+    # Show banner
+    show_banner()
+
+    # Initialize history file
+    init_history_file()
+
+    # Start Flask web server in a separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("🌐 Flask web server started on http://localhost:5000")
+
+    # Create Telegram application with job queue
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("k3", k3_command))
+    app.add_handler(CommandHandler("server", server_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logger.info("🤖 Telegram bot started. Press Ctrl+C to stop.")
+    try:
+        # Run polling – this blocks until the bot is stopped
+        app.run_polling()
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+
+if __name__ == "__main__":
+    main()
