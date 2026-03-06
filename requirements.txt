@@ -1,0 +1,8 @@
+aiohttp
+flask
+python-telegram-bot
+colorama
+cfonts
+apscheduler
+pytz
+openai==0.28.0          # Pure Python, avoids Rust compilation issues
