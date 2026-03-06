@@ -103,11 +103,11 @@ from colorama import Fore, Style
 from cfonts import render
 
 # ========== CONFIGURATION ==========
-# 🔐 YOUR CREDENTIALS
-BOT_TOKEN = "8513808688:AAGBzlIPL0nPGTJAfbBj8w1Y0UGUJe8rag8"
-CHANNEL_ID = "-1003591471913"   # Make sure the bot is ADMIN in this channel
-
-OPENAI_API_KEY = "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"
+# 🔐 YOUR CREDENTIALS – use environment variables
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8513808688:AAGBzlIPL0nPGTJAfbBj8w1Y0UGUJe8rag8")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "-1003591471913")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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")
 OPENAI_MODEL = "gpt-4o"
 
 # Server 1 configuration
@@ -546,5 +546,4 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 *Welcome, {user.first_name}!*\n\n"
         "🚨 *Note:* Real predictions milengi *sirf tab* jab aap official registration karoge.\n"
         "👇 Click *Register Now* to join 👇"
-    )
-    await update.message.reply_text(welcome, reply_markup=keyboar
+   
