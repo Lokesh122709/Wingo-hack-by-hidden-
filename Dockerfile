@@ -13,9 +13,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the main script
 COPY bigwin_wingo.py .
 
-# Make script executable (optional)
+# Make script executable
 RUN chmod +x bigwin_wingo.py
 
-# Default command: run WinGo30 with Server 1
-# You can override this by passing arguments in Railway's Start Command
-CMD ["python", "/app/bigwin_wingo.py", "30"]
+# Default command: run both games (WinGo1 and WinGo30)
+# You can override with "1" or "30" to run only one game
+CMD ["python", "/app/bigwin_wingo.py", "both"]
