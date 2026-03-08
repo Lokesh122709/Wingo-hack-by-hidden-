@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-BigWin Wingo CLI – Choose prediction server (1 or 2)
-Aesthetic loading spinner + Telegram bot integration + startup banner.
-NO PASSWORD REQUIRED – for deployment.
-
+BigWin Wingo CLI – Run both WinGo1 and WinGo30 simultaneously
+Sends predictions to Telegram group.
 Usage:
-    python script.py <game_id> [/sc]
-
-    game_id : 1 or 30 (required)
-    /sc     : use Server 2 (Markov chain), default is Server 1
+    python script.py           -> both games
+    python script.py both      -> both games
+    python script.py 1         -> only WinGo1
+    python script.py 30        -> only WinGo30
+    python script.py 30 /sc    -> only WinGo30 with Server 2
 """
 
 import subprocess
@@ -60,7 +59,7 @@ def send_telegram_message(text: str):
             payload = {
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": text,
-                "parse_mode": "HTML"
+                "parse_mode": ""  # No parse mode to ensure plain text
             }
             requests.post(TELEGRAM_API_URL, data=payload, timeout=5)
         except Exception as e:
@@ -68,10 +67,7 @@ def send_telegram_message(text: str):
     threading.Thread(target=_send, daemon=True).start()
 
 # ---------- Banners ----------
-def get_colored_banner(server_mode):
-    """Banner with ANSI color codes for console."""
-    base = f"""
-{Fore.CYAN}
+BANNER_PLAIN = """
     ██╗  ██╗██╗██████╗ ██████╗ ███████╗███╗   ██╗
     ██║  ██║██║██╔══██╗██╔══██╗██╔════╝████╗  ██║
     ███████║██║██║  ██║██║  ██║█████╗  ██╔██╗ ██║
@@ -85,30 +81,11 @@ def get_colored_banner(server_mode):
        ██╔══██║██║     ██╔═══╝ ██╔══██║██╔══██║
        ██║  ██║███████╗██║     ██║  ██║██║  ██║
        ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝
-{Style.RESET_ALL}
 """
-    server_text = f"{Fore.YELLOW}⚡ Server {server_mode} Active{Style.RESET_ALL}"
-    return base + "\n" + server_text + "\n"
 
-def get_plain_banner(server_mode):
-    """Plain text banner for Telegram (no color codes)."""
-    base = """
-    ██╗  ██╗██╗██████╗ ██████╗ ███████╗███╗   ██╗
-    ██║  ██║██║██╔══██╗██╔══██╗██╔════╝████╗  ██║
-    ███████║██║██║  ██║██║  ██║█████╗  ██╔██╗ ██║
-    ██╔══██║██║██║  ██║██║  ██║██╔══╝  ██║╚██╗██║
-    ██║  ██║██║██████╔╝██████╔╝███████╗██║ ╚████║
-    ╚═╝  ╚═╝╚═╝╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝
-                            x
-        █████╗ ██╗     ██████╗ ██╗  ██╗ █████╗
-       ██╔══██╗██║     ██╔══██╗██║  ██║██╔══██╗
-       ███████║██║     ██████╔╝███████║███████║
-       ██╔══██║██║     ██╔═══╝ ██╔══██║██╔══██║
-       ██║  ██║███████╗██║     ██║  ██║██║  ██║
-       ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝
-"""
-    server_text = f"⚡ Server {server_mode} Active"
-    return base + "\n" + server_text + "\n"
+def get_colored_banner():
+    """Colored banner for console."""
+    return f"{Fore.CYAN}{BANNER_PLAIN}{Style.RESET_ALL}"
 
 # ---------- Spinner ----------
 def spinner_task(stop_event, message="Fetching results"):
@@ -245,7 +222,7 @@ def analyze_results(results: List[Dict]):
         "max_streak": max_streak
     }
 
-# ---------- Display ----------
+# ---------- Display (console) ----------
 def colored(text, color_code):
     if HAS_COLORAMA:
         return color_code + text + Style.RESET_ALL
@@ -319,91 +296,103 @@ def export_results(results, filename):
             writer.writerow([period, number, premium, hashv, block, bs])
     print(colored(f"✅ Exported {len(results)} rows to {filename}", Fore.GREEN))
 
-# ---------- Session loop ----------
-def run_session(expiry_ms: int, game_id: str, server_mode: int):
+# ---------- Game runner thread ----------
+def game_worker(game_id: str, server_mode: int):
+    """Runs a single game in an infinite loop."""
     cd = GAMES[game_id]["cd_time"]
     game_emoji = GAMES[game_id]["emoji"]
-    results_cache = None
+    expiry = get_session_expiry()  # far future, effectively infinite
 
-    print(colored(f"\n⏳ Session active for {GAMES[game_id]['name']} (Server {server_mode}). Auto‑refreshing every {cd}s.", Fore.YELLOW))
-    print(colored("Press Ctrl+C to quit.\n", Fore.LIGHTBLACK_EX))
+    print(colored(f"\n⏳ [{GAMES[game_id]['name']}] Thread started. Server {server_mode}. Refresh every {cd}s.", Fore.YELLOW))
 
-    try:
-        while True:
-            remaining = expiry_ms - (time.time() * 1000)
-            if remaining <= 0:
-                print(colored("\n⌛ Session expired. Exiting.", Fore.RED))
-                break
+    while True:
+        remaining = expiry - (time.time() * 1000)
+        if remaining <= 0:
+            print(colored(f"\n⌛ [{GAMES[game_id]['name']}] Session expired. Exiting thread.", Fore.RED))
+            break
 
-            hours = int(remaining // 3600000)
-            minutes = int((remaining % 3600000) // 60000)
-            seconds = int((remaining % 60000) // 1000)
-            print(colored(f"\n⏰ Time left: {hours:02d}:{minutes:02d}:{seconds:02d}", Fore.CYAN))
+        # Show remaining time (optional, but we can print it)
+        hours = int(remaining // 3600000)
+        minutes = int((remaining % 3600000) // 60000)
+        seconds = int((remaining % 60000) // 1000)
+        # Uncomment next line if you want per‑game time display (can clutter)
+        # print(colored(f"\n⏰ [{GAMES[game_id]['name']}] Time left: {hours:02d}:{minutes:02d}:{seconds:02d}", Fore.CYAN))
 
-            stop_spinner = threading.Event()
-            spinner_thread = threading.Thread(target=spinner_task, args=(stop_spinner, "Fetching results"))
-            spinner_thread.daemon = True
-            spinner_thread.start()
+        # Spinner for this game (optional, but we'll just fetch without spinner to avoid conflicts)
+        # We'll just fetch directly
+        results = fetch_results(game_id)
 
-            results = fetch_results(game_id)
-
-            stop_spinner.set()
-            spinner_thread.join()
-
-            if results:
-                results_cache = results
-                stats = analyze_results(results)
-                if server_mode == 1:
-                    pred = compute_prediction_system1(results)
-                else:
-                    pred = compute_prediction_system2(results)
-
-                pred_emoji = "🟢" if pred == "BIG" else "🔴" if pred == "SMALL" else "⚪"
-                telegram_msg = f"{game_emoji} {GAMES[game_id]['name']} [Server {server_mode}] Prediction: {pred} {pred_emoji}"
-                send_telegram_message(telegram_msg)
-
-                if stats:
-                    print_stats(stats, GAMES[game_id]['name'], game_emoji, pred, server_mode)
-                print_recent(results, limit=10)
+        if results:
+            stats = analyze_results(results)
+            if server_mode == 1:
+                pred = compute_prediction_system1(results)
             else:
-                print(colored("⚠️  Could not fetch results. Retrying...", Fore.YELLOW))
+                pred = compute_prediction_system2(results)
 
-            time.sleep(cd)
-    except KeyboardInterrupt:
-        print(colored("\n👋 Session terminated by user.", Fore.YELLOW))
-        if results_cache:
-            ans = input("Export results before quitting? (y/n): ").strip().lower()
-            if ans == 'y':
-                filename = f"wingo_{game_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                export_results(results_cache, filename)
+            pred_emoji = "🟢" if pred == "BIG" else "🔴" if pred == "SMALL" else "⚪"
+            telegram_msg = f"{game_emoji} {GAMES[game_id]['name']} [Server {server_mode}] Prediction: {pred} {pred_emoji}"
+            send_telegram_message(telegram_msg)
+
+            # Also print to console (optional)
+            if stats:
+                print_stats(stats, GAMES[game_id]['name'], game_emoji, pred, server_mode)
+            print_recent(results, limit=5)  # show fewer to reduce clutter
+        else:
+            print(colored(f"⚠️ [{GAMES[game_id]['name']}] Could not fetch results. Retrying...", Fore.YELLOW))
+
+        time.sleep(cd)
 
 # ---------- Main ----------
 def main():
-    parser = argparse.ArgumentParser(description="BigWin Wingo Predictor")
-    parser.add_argument("game", help="Game ID: 1 or 30")
-    parser.add_argument("server", nargs="?", help="'/sc' for Server 2 (Markov chain)")
+    parser = argparse.ArgumentParser(description="BigWin Wingo Predictor (Dual Game)")
+    parser.add_argument("mode", nargs="?", default="both", help="'1', '30', 'both' (default), or '/sc' for server2 (use with game)")
+    parser.add_argument("server", nargs="?", help="'/sc' for Server 2 (Markov chain) – only if mode is a game ID")
     args = parser.parse_args()
 
+    # Determine which games to run and server modes
+    games_to_run = []
     server_mode = 1
+
+    # Handle server argument
     if args.server and args.server.lower() == '/sc':
         server_mode = 2
 
-    game_id = args.game
-    if game_id not in GAMES:
-        print(colored(f"❌ Invalid game ID: {game_id}. Must be 1 or 30.", Fore.RED))
+    # Parse mode
+    mode = args.mode.lower() if args.mode else "both"
+
+    if mode == "both":
+        games_to_run = [("1", 1), ("30", 1)]  # both with Server 1
+        # If server arg was given with both, ignore? We'll just use server 1 for both.
+        print(colored("🎰 Running both WinGo1 and WinGo30 with Server 1", Fore.GREEN))
+    elif mode == "1":
+        games_to_run = [("1", server_mode)]
+        print(colored(f"🎰 Running WinGo1 with Server {server_mode}", Fore.GREEN))
+    elif mode == "30":
+        games_to_run = [("30", server_mode)]
+        print(colored(f"🎰 Running WinGo30 with Server {server_mode}", Fore.GREEN))
+    else:
+        print(colored(f"❌ Invalid mode: {mode}. Use '1', '30', or 'both'.", Fore.RED))
         sys.exit(1)
 
-    # Print colored banner to console
-    print(get_colored_banner(server_mode))
-    print(colored(f"🎰 BigWin Wingo CLI – Server {server_mode} Active (No Password)", Fore.GREEN))
+    # Print banner to console
+    print(get_colored_banner())
+    # Send banner to Telegram
+    send_telegram_message(BANNER_PLAIN)
 
-    # Send plain banner to Telegram
-    plain_banner = get_plain_banner(server_mode)
-    send_telegram_message(plain_banner)
+    # Start threads for each game
+    threads = []
+    for game_id, srv in games_to_run:
+        t = threading.Thread(target=game_worker, args=(game_id, srv), daemon=True)
+        t.start()
+        threads.append(t)
 
-    expiry = get_session_expiry()
-    print(colored("✅ Starting auto‑refresh...", Fore.GREEN))
-    run_session(expiry, game_id, server_mode)
+    # Keep main thread alive
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print(colored("\n👋 Shutting down by user request.", Fore.YELLOW))
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
