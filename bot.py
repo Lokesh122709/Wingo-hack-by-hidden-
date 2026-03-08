@@ -1,731 +1,403 @@
 #!/usr/bin/env python3
 """
-ULTIMATE RIZEN X AI – DUAL SERVER EDITION (FIXED)
-Now only the active server generates predictions.
-No more duplicate messages.
+BigWin Wingo CLI – Choose prediction server (1 or 2)
+Aesthetic loading spinner + Telegram bot integration.
+NO PASSWORD REQUIRED – for deployment.
+
+Usage:
+    python script.py [game_id] [/sc]
+
+    game_id : 1 or 30 (optional, will prompt if missing)
+    /sc     : use Server 2 (Markov chain), default is Server 1
 """
 
-import sys
 import subprocess
-import importlib
-
-# ========== AUTO‑INSTALL MISSING PACKAGES ==========
-def install_and_import(package, import_name=None, version=None):
-    import_name = import_name or package
-    try:
-        return importlib.import_module(import_name)
-    except ImportError:
-        print(f"📦 Installing {package}{'=='+version if version else ''}...")
-        cmd = [sys.executable, "-m", "pip", "install"]
-        if version:
-            cmd.append(f"{package}=={version}")
-        else:
-            cmd.append(package)
-        try:
-            subprocess.check_call(cmd)
-            return importlib.import_module(import_name)
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to install {package}. Some features may be disabled.")
-            return None
-
-# Install core packages
-aiohttp = install_and_import("aiohttp")
-flask = install_and_import("flask")
-telegram = install_and_import("python-telegram-bot", "telegram")
-telegram_ext = install_and_import("python-telegram-bot", "telegram.ext")
-colorama = install_and_import("colorama")
-cfonts = install_and_import("cfonts")
-apscheduler = install_and_import("apscheduler")
-pytz = install_and_import("pytz")
-
-# Try to install openai – try older pure‑Python version first, then latest
-openai = install_and_import("openai", version="0.28.0")
-if openai is None:
-    openai = install_and_import("openai")  # try latest
-
-if openai is None:
-    print("⚠️ OpenAI module could not be installed. AI chat will be disabled.")
-    openai_available = False
-    openai_client = None
-    openai_version = None
-else:
-    openai_available = True
-    import openai as openai_mod
-    # Detect version
-    if hasattr(openai_mod, "__version__") and openai_mod.__version__.startswith("0."):
-        # Old API (v0.x)
-        openai_client = openai_mod
-        openai_version = "old"
-        print("✅ OpenAI v0.x installed (using legacy API)")
-    else:
-        # New API (v1+)
-        from openai import OpenAI
-        openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        openai_version = "new"
-        print("✅ OpenAI v1+ installed (using new API)")
-
-# Now import everything normally
-import asyncio
-import logging
-import random
-import json
-import os
+import sys
 import time
+import csv
 import threading
-from collections import deque
+import itertools
+import argparse
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, Any
-
-# Telegram imports
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    CallbackQueryHandler,
-    ContextTypes,
-    JobQueue,
-)
-
-# Flask
-from flask import Flask, send_from_directory, abort
-
-# Colorama
-from colorama import Fore, Style
-
-# Cfonts
-from cfonts import render
-
-# ========== CONFIGURATION ==========
-# 🔐 YOUR CREDENTIALS – use environment variables
-import os
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8513808688:AAGBzlIPL0nPGTJAfbBj8w1Y0UGUJe8rag8")
-CHANNEL_ID = os.getenv("CHANNEL_ID", "-1003591471913")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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")
-OPENAI_MODEL = "gpt-4o"
-
-# Server 1 configuration
-SERVER1_CONFIG = {
-    "name": "Server 1 (51game random)",
-    "api_source": "51game",
-    "prediction_method": "random",
-    "auto_send": True,
-    "goal": 0,
-    "send_stickers": True,
-    "send_result_updates": True,
-}
-
-# Server 2 configuration
-SERVER2_CONFIG = {
-    "name": "Server 2 (51game average)",
-    "api_source": "51game",
-    "prediction_method": "average",
-    "auto_send": True,
-    "goal": 0,
-    "send_stickers": True,
-    "send_result_updates": True,
-}
-
-PREDICTION_IMAGE_URL = "https://i.ibb.co/Sw01h2BC/Gemini-Generated-Image-lw4c2llw4c2llw4c.png"
-WIN_STICKER_IDS = [
-    "CAACAgUAAxkBAAEBg-donNkibZLs9zPl7MRidXxY1FKF3QACBRIAAjRZYFSuC_g0_byf5TYE",
-    "CAACAgQAAxkBAAKmimf5EB9GTlXRtwVB3ez1nBUKzf69AAKaDAACfx_4UvcUEDj6i_r9NgQ",
-    "CAACAgQAAxkBAAKmjWf5ECecZUCJtSeuqsaaVWILpTuyAALICwACG86YUDSKklgR_M5FNgQ",
-    "CAACAgIAAxkBAAKmkGf5EDBgwnSDovUPpQGsTjMQdU69AAL4DAACNyx5S6FYW3VBcuj4NgQ"
-]
-NUMBER_WIN_STICKER_ID = "CAACAgUAAxkBAAEBhfNooJofyaQPYk77B0QGfe83gH0gigACbRMAAmKzUFSqQXjp5UjYE"
-
-REGISTER_LINK = "https://bharatclub.bet/#/register?invitationCode=338764745230"
-HISTORY_FILE = "prediction_history.json"
-
-# ========== PREDICTION SERVER CLASS ==========
-class PredictionServer:
-    """Handles all prediction logic for one server."""
-    def __init__(self, name: str, config: dict):
-        self.name = name
-        self.config = config
-        self.history = deque(maxlen=100)          # list of dicts: period, prediction, pair, status, result, result_type
-        self.predictions_sent = 0
-        self.goal = config.get("goal", 0)
-        self.auto_send = config.get("auto_send", True)
-        self.telegram_sent_periods = {}           # track which periods already had prediction/sticker sent
-        self.api_source = config.get("api_source", "51game")
-        self.prediction_method = config.get("prediction_method", "random")
-        self.send_stickers = config.get("send_stickers", True)
-        self.send_result_updates = config.get("send_result_updates", True)
-
-        # Predefined prediction pairs (for random method)
-        self.BIG_PAIRS = ["1+3", "2+4", "3+5", "4+6"]
-        self.SMALL_PAIRS = ["6+8", "7+9", "8+0", "9+1"]
-
-    def get_big_small(self, num: int) -> str:
-        return "BIG" if num >= 5 else "SMALL"
-
-    def generate_prediction_random(self) -> Tuple[str, str]:
-        r = random.random()
-        if r < 0.5:
-            size = "SMALL"
-            pool = self.SMALL_PAIRS
-        else:
-            size = "BIG"
-            pool = self.BIG_PAIRS
-        pair = random.choice(pool)
-        return size, pair
-
-    def generate_prediction_average(self) -> Tuple[str, str]:
-        results = [entry["result"] for entry in self.history if entry["result"] is not None]
-        if len(results) < 5:
-            return self.generate_prediction_random()
-        avg = sum(results[-5:]) / 5
-        size = "BIG" if avg > 5 else "SMALL"
-        return size, "?"   # no number pair for average method
-
-    def generate_prediction(self) -> Tuple[str, str]:
-        if self.prediction_method == "random":
-            return self.generate_prediction_random()
-        elif self.prediction_method == "average":
-            return self.generate_prediction_average()
-        else:
-            return "BIG", "1+3"
-
-    def get_stats(self) -> dict:
-        wins = sum(1 for e in self.history if e["status"] == "WIN")
-        losses = sum(1 for e in self.history if e["status"] == "LOSS")
-        total = wins + losses
-        accuracy = (wins / total * 100) if total else 0
-        return {
-            "wins": wins,
-            "losses": losses,
-            "total": total,
-            "accuracy": accuracy,
-            "predictions_sent": self.predictions_sent,
-            "goal": self.goal,
-        }
-
-# ========== GLOBAL STATE ==========
-# Create two server instances
-server1 = PredictionServer("Server 1 (51game random)", SERVER1_CONFIG)
-server2 = PredictionServer("Server 2 (51game average)", SERVER2_CONFIG)
-active_server = server1   # start with server1
-
-# For channel access
-channel_accessible = True
-
-# ========== LOGGING ==========
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
-
-# ========== FLASK WEB SERVER ==========
-app_web = Flask(__name__)
-HTML_DIR = "html_dashboards"
-os.makedirs(HTML_DIR, exist_ok=True)
-
-@app_web.route('/')
-def index():
-    return send_from_directory(HTML_DIR, 'index.html')
-
-@app_web.route('/<path:filename>')
-def serve_file(filename):
-    try:
-        return send_from_directory(HTML_DIR, filename)
-    except Exception:
-        abort(404)
-
-def run_flask():
-    app_web.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
-
-# ========== USER HISTORY FUNCTIONS (for interactive predictions) ==========
-def init_history_file():
-    if not os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "w") as f:
-            json.dump({}, f)
-
-def save_prediction(user_id: int, first_name: str, username: str, pred_type: str, number: int):
-    with open(HISTORY_FILE, "r") as f:
-        data = json.load(f)
-    uid = str(user_id)
-    if uid not in data:
-        data[uid] = {
-            "first_name": first_name,
-            "username": username,
-            "history": []
-        }
-    data[uid]["history"].append({
-        "type": pred_type,
-        "number": number,
-        "timestamp": time.time()
-    })
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-def get_user_history(user_id: int) -> list:
-    with open(HISTORY_FILE, "r") as f:
-        data = json.load(f)
-    return data.get(str(user_id), {}).get("history", [])
-
-def get_user_info(user_id: int) -> Tuple[str, str]:
-    with open(HISTORY_FILE, "r") as f:
-        data = json.load(f)
-    user_data = data.get(str(user_id), {})
-    name = user_data.get("first_name", "Unknown")
-    username = user_data.get("username", "N/A")
-    return name, username
-
-# ========== API FETCHING (async) ==========
-async def fetch_ar_1m(session: aiohttp.ClientSession) -> Optional[dict]:
-    url = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
-    params = {"ts": int(time.time() * 1000)}
-    try:
-        async with session.get(url, params=params, timeout=10) as resp:
-            data = await resp.json()
-            latest = data["data"]["list"][0]
-            return {
-                "period": latest["issueNumber"],
-                "number": int(latest["number"])
-            }
-    except Exception as e:
-        logger.error(f"ar-1m fetch error: {e}")
-        return None
-
-async def fetch_ar_30s(session: aiohttp.ClientSession) -> Optional[dict]:
-    url = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json"
-    params = {"ts": int(time.time() * 1000)}
-    try:
-        async with session.get(url, params=params, timeout=10) as resp:
-            data = await resp.json()
-            latest = data["data"][0]
-            return {
-                "period": latest.get("issueNumber", "?"),
-                "number": int(latest["winNumber"])
-            }
-    except Exception as e:
-        logger.error(f"ar-30s fetch error: {e}")
-        return None
-
-async def fetch_51game(session: aiohttp.ClientSession) -> Optional[dict]:
-    url = "https://api.51gameapi.com/api/webapi/GetNoaverageEmerdList"
-    payload = {
-        "pageSize": 10,
-        "pageNo": 1,
-        "typeId": 1,
-        "language": 0,
-        "random": "6fadc24ccf2c4ed4afb5a1a5f84d2ba4",
-        "signature": "4E071E587A80572ED6065D6F135F3ABE",
-        "timestamp": int(time.time())
-    }
-    headers = {"Content-Type": "application/json"}
-    try:
-        async with session.post(url, json=payload, headers=headers, timeout=10) as resp:
-            data = await resp.json()
-            latest = data["data"]["list"][0]
-            return {
-                "period": latest["issueNumber"],
-                "number": int(latest["number"])
-            }
-    except Exception as e:
-        logger.error(f"51game fetch error: {e}")
-        return None
-
-async def fetch_latest_result(api_source: str) -> Optional[dict]:
-    async with aiohttp.ClientSession() as session:
-        if api_source == "ar-1m":
-            return await fetch_ar_1m(session)
-        elif api_source == "ar-30s":
-            return await fetch_ar_30s(session)
-        elif api_source == "51game":
-            return await fetch_51game(session)
-        else:
-            logger.error(f"Unknown API source: {api_source}")
-            return None
-
-# ========== TELEGRAM SENDING HELPERS ==========
-async def send_message(bot, chat_id: str, text: str, parse_mode: str = "HTML"):
-    global channel_accessible
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
-        logger.info(f"Message sent to {chat_id}")
-    except Exception as e:
-        logger.error(f"Failed to send message: {e}")
-        if "chat not found" in str(e).lower():
-            channel_accessible = False
-            logger.warning("⚠️ Channel is not accessible. Auto‑send disabled.")
-
-async def send_photo(bot, chat_id: str, caption: str, photo_url: str):
-    global channel_accessible
-    try:
-        await bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption, parse_mode="HTML")
-        logger.info(f"Photo sent to {chat_id}")
-    except Exception as e:
-        logger.error(f"Failed to send photo: {e}")
-        if "chat not found" in str(e).lower():
-            channel_accessible = False
-            logger.warning("⚠️ Channel is not accessible. Auto‑send disabled.")
-
-async def send_sticker(bot, chat_id: str, sticker_id: str):
-    global channel_accessible
-    try:
-        await bot.send_sticker(chat_id=chat_id, sticker=sticker_id)
-        logger.info(f"Sticker sent to {chat_id}")
-    except Exception as e:
-        logger.error(f"Failed to send sticker: {e}")
-        if "chat not found" in str(e).lower():
-            channel_accessible = False
-            logger.warning("⚠️ Channel is not accessible. Auto‑send disabled.")
-
-async def send_prediction_to_channel(bot, period: str, prediction: str, pair: str):
-    global channel_accessible
-    if not channel_accessible:
-        return
-    date = datetime.now().strftime("%d-%m-%Y")
-    caption = f"""🚀 <b>RIZEN X AI PREDICTION</b> 🚀
-
-╔═◈═◈═◈═◈═◈═╗
-📅 <b>Date:</b> {date}
-🎯 <b>Name:</b> RIZEN AI BOT
-⏳ <b>Wingo:</b> 1Min
-🔢 <b>Period No:</b> {period}
-╚═◈═◈═◈═◈═◈═╝
-
-📊 <b>RESULT INFO</b> 📊
-✅ <b>Big/Small:</b> {prediction}
-✅ <b>Numbers:</b> {pair}
-──────✦✧✦──────"""
-    await send_photo(bot, CHANNEL_ID, caption, PREDICTION_IMAGE_URL)
-
-# ========== CORE LOGIC FOR A SERVER ==========
-async def update_server_results(server: PredictionServer, bot):
-    """Check results for one server and update its history."""
-    global channel_accessible
-
-    if not channel_accessible:
-        return
-
-    latest = await fetch_latest_result(server.api_source)
-    if not latest:
-        return
-
-    current_period = latest["period"]
-    current_number = latest["number"]
-    current_type = server.get_big_small(current_number)
-
-    if server.send_result_updates and server is active_server:
-        result_msg = f"📊 <b>Period {current_period} Result:</b> {current_number} ({current_type})"
-        await send_message(bot, CHANNEL_ID, result_msg)
-
-    # Update any pending prediction for this period
-    for entry in server.history:
-        if entry["period"] == current_period and entry["status"] == "PENDING":
-            predicted_size = entry["prediction"]
-            predicted_pair = entry["pair"]
-            number_win = False
-            if predicted_pair != "?":
-                try:
-                    num1, num2 = map(int, predicted_pair.split('+'))
-                    number_win = (current_number == num1 or current_number == num2)
-                except:
-                    pass
-            size_win = (predicted_size == current_type)
-
-            if size_win or number_win:
-                entry["status"] = "WIN"
-                win_type = "NUMBER" if number_win else "BIGSMALL"
-            else:
-                entry["status"] = "LOSS"
-                win_type = None
-
-            entry["result"] = current_number
-            entry["result_type"] = current_type
-
-            if server.send_stickers and entry["status"] == "WIN" and channel_accessible and server is active_server:
-                period_sent = server.telegram_sent_periods.get(current_period, {})
-                if not period_sent.get("sticker"):
-                    sticker = NUMBER_WIN_STICKER_ID if win_type == "NUMBER" else random.choice(WIN_STICKER_IDS)
-                    await send_sticker(bot, CHANNEL_ID, sticker)
-                    server.telegram_sent_periods.setdefault(current_period, {})["sticker"] = True
-            break
-
-async def generate_server_prediction(server: PredictionServer, bot):
-    """Generate next prediction for the server (only for active server)."""
-    global channel_accessible
-
-    if not channel_accessible:
-        return
-
-    latest = await fetch_latest_result(server.api_source)
-    if not latest:
-        return
-
-    current_period = latest["period"]
-    next_period = str(int(current_period) + 1)
-
-    # Avoid duplicate prediction in history
-    for entry in server.history:
-        if entry["period"] == next_period:
-            return
-
-    prediction, pair = server.generate_prediction()
-    server.history.appendleft({
-        "period": next_period,
-        "prediction": prediction,
-        "pair": pair,
-        "status": "PENDING",
-        "result": None,
-        "result_type": None
-    })
-
-    if server.auto_send and (server.goal == 0 or server.predictions_sent < server.goal) and channel_accessible:
-        period_sent = server.telegram_sent_periods.get(next_period, {})
-        if not period_sent.get("prediction"):
-            await send_prediction_to_channel(bot, next_period, prediction, pair)
-            server.telegram_sent_periods.setdefault(next_period, {})["prediction"] = True
-            server.predictions_sent += 1
-            if server.goal > 0 and server.predictions_sent >= server.goal:
-                logger.info(f"{server.name} goal reached, disabling auto-send")
-                server.auto_send = False
-                await send_message(bot, CHANNEL_ID, f"🎯 <b>{server.name} TARGET COMPLETED!</b> 🎯\nProfit Success! 🍾🎉")
-
-# ========== BACKGROUND TASK ==========
-async def periodic_update(context: ContextTypes.DEFAULT_TYPE):
-    """Called every 2 seconds; updates results for both servers, but generates only for active."""
-    bot = context.bot
-    # Update results for both servers (they both need to know outcomes)
-    await update_server_results(server1, bot)
-    await update_server_results(server2, bot)
-    # Generate next prediction only for active server
-    await generate_server_prediction(active_server, bot)
-
-# ========== K3 PREDICTOR ==========
-def get_k3_period() -> str:
-    now = datetime.now()
-    total_minutes = now.hour * 60 + now.minute
-    return f"{now.year}{now.month:02d}{now.day:02d}1000{10001 + total_minutes - 330}"
-
-def seeded_random(seed: int):
-    value = seed
-    while True:
-        value = (value * 9301 + 49297) % 233280
-        yield value / 233280
-
-def get_k3_prediction() -> str:
-    period = get_k3_period()
-    seed = int(period)
-    rng = seeded_random(seed)
-    numbers = [int(next(rng) * 6) + 1 for _ in range(3)]
-    total = sum(numbers)
-    big_small = "Big 🚀" if total >= 11 else "Small 🐢" if total >= 4 else "Invalid"
-    odd_even = "Even 🔵" if total % 2 == 0 else "Odd 🔴"
-    num_str = " + ".join(map(str, numbers))
-    return (
-        f"🎲 <b>K3 WINGO PREDICTION</b>\n\n"
-        f"Period: <code>{period}</code>\n"
-        f"Numbers: {num_str}\n"
-        f"Sum: <b>{total}</b>\n"
-        f"Big/Small: <b>{big_small}</b>\n"
-        f"Odd/Even: <b>{odd_even}</b>"
-    )
-
-# ========== TELEGRAM COMMAND HANDLERS ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔮 Get Prediction", callback_data="predict"),
-         InlineKeyboardButton("🗂 My History", callback_data="history")],
-        [InlineKeyboardButton("🔗 Register Now", callback_data="register"),
-         InlineKeyboardButton("ℹ️ About", callback_data="about")]
-    ])
-    welcome = (
-        f"👋 *Welcome, {user.first_name}!*\n\n"
-        "🚨 *Note:* Real predictions milengi *sirf tab* jab aap official registration karoge.\n"
-        "👇 Click *Register Now* to join 👇"
-    )
-    await update.message.reply_text(welcome, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    user_id = user.id
-    first_name = user.first_name
-    username = user.username or "N/A"
-
-    if query.data == "predict":
-        await query.message.reply_chat_action("typing")
-        pred_type = random.choice(['Big', 'Small'])
-        number = random.randint(1, 100)
-        save_prediction(user_id, first_name, username, pred_type, number)
-        result = f"🎯 *Prediction:*\nType: `{pred_type}`\nNumber: `{number}`"
-        await query.message.reply_text(result, parse_mode=ParseMode.MARKDOWN)
-
-    elif query.data == "about":
-        text = (
-            "🤖 *About This Bot:*\n"
-            "Under 2-3 Lvl Winnings mil Jayegi Bs Lvl Mantion kro.\n"
-            "_Injoy._"
-        )
-        await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-    elif query.data == "register":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Click to Register", url=REGISTER_LINK)]
-        ])
-        await query.message.reply_text(
-            "📝 *Registration Required!*\n\n"
-            "Sirf registration ke baad hi aapko real predictions milenge.\n"
-            "👇 Register now 👇",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-    elif query.data == "history":
-        history_list = get_user_history(user_id)
-        name, uname = get_user_info(user_id)
-        if history_list:
-            text = f"*🗂 Prediction History for {name} (@{uname}):*\n\n"
-            for i, entry in enumerate(history_list[-10:], 1):
-                text += f"{i}. `{entry['type']}` — `{entry['number']}`\n"
-        else:
-            text = "🚫 *No prediction history found yet.*"
-        await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-async def k3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(get_k3_prediction(), parse_mode=ParseMode.HTML)
-
-async def server_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Switch active server and show stats."""
-    global active_server
-    text = update.message.text.split()
-    if len(text) > 1:
-        choice = text[1].lower()
-        if choice == "1" or choice == "server1":
-            active_server = server1
-            await update.message.reply_text(f"✅ Active server switched to **{server1.name}**", parse_mode=ParseMode.MARKDOWN)
-        elif choice == "2" or choice == "server2":
-            active_server = server2
-            await update.message.reply_text(f"✅ Active server switched to **{server2.name}**", parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text("Usage: /server [1|2]")
+from typing import Optional, Dict, List, Tuple
+from collections import Counter
+
+# Auto‑install requests (required)
+try:
+    import requests
+except ImportError:
+    print("📦 Required package 'requests' not found.")
+    ans = input("Install requests now? (y/n): ").strip().lower()
+    if ans == 'y':
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
+        import requests
     else:
-        # Show stats for both servers
-        stats1 = server1.get_stats()
-        stats2 = server2.get_stats()
-        msg = (
-            f"**Current active server:** {active_server.name}\n\n"
-            f"**{server1.name}**\n"
-            f"Wins: {stats1['wins']}, Losses: {stats1['losses']}, Accuracy: {stats1['accuracy']:.2f}%\n"
-            f"Predictions sent: {stats1['predictions_sent']}\n\n"
-            f"**{server2.name}**\n"
-            f"Wins: {stats2['wins']}, Losses: {stats2['losses']}, Accuracy: {stats2['accuracy']:.2f}%\n"
-            f"Predictions sent: {stats2['predictions_sent']}\n\n"
-            f"To switch: /server 1 or /server 2"
-        )
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        sys.exit(1)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle any text message – use OpenAI if available."""
-    if not openai_available or openai_client is None:
-        await update.message.reply_text("AI chat is currently disabled because OpenAI could not be installed. Please try again later.")
-        return
+# Optional packages
+try:
+    from tabulate import tabulate
+    HAS_TABULATE = True
+except ImportError:
+    HAS_TABULATE = False
 
-    user_text = update.message.text
+try:
+    from colorama import init, Fore, Back, Style
+    init(autoreset=True)
+    HAS_COLORAMA = True
+except ImportError:
+    HAS_COLORAMA = False
+
+# ---------- Telegram Bot Configuration ----------
+TELEGRAM_BOT_TOKEN = "8613029389:AAF45M8HvWswhXgUOBTB6Aiveo4Tgw9jR6A"
+TELEGRAM_CHAT_ID = "-1003625900626"
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+def send_telegram_message(text: str):
+    """Send a message to the configured Telegram group (non‑blocking)."""
+    def _send():
+        try:
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML"
+            }
+            requests.post(TELEGRAM_API_URL, data=payload, timeout=5)
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Telegram send failed: {e}{Style.RESET_ALL}")
+    threading.Thread(target=_send, daemon=True).start()
+
+# ---------- Banner (with server indicator) ----------
+def get_banner(server_mode):
+    base = f"""
+{Fore.CYAN}
+    ██╗  ██╗██╗██████╗ ██████╗ ███████╗███╗   ██╗
+    ██║  ██║██║██╔══██╗██╔══██╗██╔════╝████╗  ██║
+    ███████║██║██║  ██║██║  ██║█████╗  ██╔██╗ ██║
+    ██╔══██║██║██║  ██║██║  ██║██╔══╝  ██║╚██╗██║
+    ██║  ██║██║██████╔╝██████╔╝███████╗██║ ╚████║
+    ╚═╝  ╚═╝╚═╝╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝
+                            x
+        █████╗ ██╗     ██████╗ ██╗  ██╗ █████╗
+       ██╔══██╗██║     ██╔══██╗██║  ██║██╔══██╗
+       ███████║██║     ██████╔╝███████║███████║
+       ██╔══██║██║     ██╔═══╝ ██╔══██║██╔══██║
+       ██║  ██║███████╗██║     ██║  ██║██║  ██║
+       ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝
+{Style.RESET_ALL}
+"""
+    server_text = f"{Fore.YELLOW}⚡ Server {server_mode} Active{Style.RESET_ALL}"
+    return base + "\n" + server_text + "\n"
+
+# ---------- Spinner for aesthetic loading ----------
+def spinner_task(stop_event, message="Fetching results"):
+    """Display a spinner until stop_event is set."""
+    spinner = itertools.cycle(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+    color = Fore.CYAN if HAS_COLORAMA else ""
+    reset = Style.RESET_ALL if HAS_COLORAMA else ""
+    while not stop_event.is_set():
+        for _ in range(10):
+            if stop_event.is_set():
+                break
+            sys.stdout.write(f"\r{color}{next(spinner)} {message}...{reset}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+    sys.stdout.write("\r" + " " * 50 + "\r")
+    sys.stdout.flush()
+
+# ---------- Configuration ----------
+FIREBASE_CONFIG = {
+    "apiKey": "AIzaSyDj6z3O91NnlQ1zVdripiGhqQMsQhR4_ak",
+    "databaseURL": "https://ck30-35e97-default-rtdb.europe-west1.firebasedatabase.app"
+}
+
+LOGIN_CONFIG = {
+    "apiKey": "AIzaSyBynBT5W_C6rNVEUB4j7ABiJQeSfQGU4Mo",
+    "databaseURL": "https://lotteryoo-default-rtdb.europe-west1.firebasedatabase.app"
+}
+
+GAMES = {
+    "1": {
+        "name": "WinGo1",
+        "firebase_path": "bigwinwingo1/default",
+        "static_key": "LOKESH124",
+        "cd_time": 60,
+        "emoji": "🎲"
+    },
+    "30": {
+        "name": "WinGo30",
+        "firebase_path": "bigwin/default",
+        "static_key": "LOKESH123",
+        "cd_time": 30,
+        "emoji": "🎰"
+    }
+}
+
+# ---------- Firebase helpers ----------
+def firebase_get(url: str) -> Optional[Dict]:
     try:
-        if openai_version == "new":
-            response = openai_client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": user_text}
-                ]
-            )
-            answer = response.choices[0].message.content
+        resp = requests.get(url + ".json")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"{Fore.RED}🔥 Firebase error: {e}{Style.RESET_ALL}")
+        return None
+
+def fetch_results(game_id: str) -> Optional[List[Dict]]:
+    url = f"{FIREBASE_CONFIG['databaseURL']}/{GAMES[game_id]['firebase_path']}"
+    data = firebase_get(url)
+    if data and "list" in data and isinstance(data["list"], list):
+        return data["list"]
+    return None
+
+def get_session_expiry() -> int:
+    """Return a far‑future timestamp (100 years from now)."""
+    return int((datetime.now() + timedelta(days=36500)).timestamp() * 1000)
+
+# ---------- Results processing ----------
+def classify(n):
+    try:
+        num = int(n)
+        return "BIG" if num >= 5 else "SMALL"
+    except:
+        return None
+
+def compute_prediction_system1(results: List[Dict]) -> str:
+    if len(results) < 2:
+        return "Insufficient data"
+    last5 = results[:5]
+    weighted_big = 0
+    weighted_small = 0
+    for i, r in enumerate(last5):
+        weight = 2 if i < 3 else 1
+        bs = classify(r.get("number"))
+        if bs == "BIG":
+            weighted_big += weight
+        elif bs == "SMALL":
+            weighted_small += weight
+    return "BIG" if weighted_big >= weighted_small else "SMALL"
+
+def compute_prediction_system2(results: List[Dict]) -> str:
+    if len(results) < 2:
+        return "Insufficient data"
+    trans = {"BIG": {"BIG": 0, "SMALL": 0}, "SMALL": {"BIG": 0, "SMALL": 0}}
+    for i in range(1, len(results)):
+        prev = classify(results[i-1].get("number"))
+        curr = classify(results[i].get("number"))
+        if prev and curr:
+            trans[prev][curr] += 1
+
+    last_outcome = classify(results[0].get("number"))
+    if last_outcome and (trans[last_outcome]["BIG"] + trans[last_outcome]["SMALL"]) > 0:
+        if trans[last_outcome]["BIG"] > trans[last_outcome]["SMALL"]:
+            return "BIG"
+        elif trans[last_outcome]["SMALL"] > trans[last_outcome]["BIG"]:
+            return "SMALL"
         else:
-            # old version (0.28.0)
-            response = openai_client.ChatCompletion.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": user_text}
-                ]
-            )
-            answer = response.choices[0].message.content
-        await update.message.reply_text(answer)
-    except Exception as e:
-        logger.error(f"OpenAI error: {e}")
-        await update.message.reply_text("Kuch galat ho gaya, later try karo.")
+            return "EQUAL"
+    return "Unknown"
 
-# ========== BANNER ==========
-def type_writer(text, delay=0.0009):
-    for ch in text:
-        sys.stdout.write(ch)
-        sys.stdout.flush()
-        time.sleep(delay)
-    print()
+def analyze_results(results: List[Dict]):
+    if not results:
+        return None
 
-def show_banner():
-    output = render('RIZEN X AI', colors=['cyan', 'magenta'], align='center', font='block')
-    for line in output.split("\n"):
-        type_writer(line, 0.001)
-    print(Fore.GREEN + "=" * 70 + Style.RESET_ALL)
-    type_writer(f"{Fore.YELLOW}⚡ Premium Prediction System (Dual Server) ⚡{Style.RESET_ALL}\n", 0.002)
+    big = sum(1 for r in results if classify(r.get("number")) == "BIG")
+    small = sum(1 for r in results if classify(r.get("number")) == "SMALL")
+    total = len(results)
 
-# ========== CHANNEL ACCESS CHECK ==========
-async def check_channel_access(app: Application):
-    """Send a test message to verify channel access."""
-    global channel_accessible
+    digits = [int(r["number"]) for r in results if str(r.get("number")).isdigit()]
+    freq = Counter(digits)
+    most_common = freq.most_common(3)
+    least_common = freq.most_common()[:-4:-1] if freq else []
+
+    max_streak = 0
+    current = 0
+    last = None
+    for r in results:
+        bs = classify(r.get("number"))
+        if bs == last:
+            current += 1
+        else:
+            current = 1
+            last = bs
+        if current > max_streak:
+            max_streak = current
+
+    return {
+        "big": big,
+        "small": small,
+        "total": total,
+        "freq": freq,
+        "most_common": most_common,
+        "least_common": least_common,
+        "max_streak": max_streak
+    }
+
+# ---------- Display ----------
+def colored(text, color_code):
+    if HAS_COLORAMA:
+        return color_code + text + Style.RESET_ALL
+    return text
+
+def print_stats(stats, game_name, game_emoji, prediction, server_mode):
+    server_label = f"Server {server_mode}"
+    pred_emoji = "🟢" if prediction == "BIG" else "🔴" if prediction == "SMALL" else "⚪"
+    print("\n" + "="*70)
+    print(colored(f"{game_emoji} {game_name} Statistics {game_emoji} [{server_label}]", Fore.CYAN + Back.BLACK))
+    print("="*70)
+    print(f"  {colored('🦁 BIG', Fore.GREEN)}   : {stats['big']}   {colored('🐭 SMALL', Fore.YELLOW)} : {stats['small']}   {colored('📊 TOTAL', Fore.MAGENTA)} : {stats['total']}")
+    print(f"  {colored('⚡ Max streak', Fore.CYAN)} : {stats['max_streak']}")
+
+    print(f"\n{colored('🔢 Digit frequency (0-9):', Fore.CYAN)}")
+    if HAS_TABULATE:
+        table = [[d, stats['freq'].get(d, 0)] for d in range(10)]
+        print(tabulate(table, headers=["Digit", "Count"], tablefmt="grid"))
+    else:
+        for d in range(10):
+            cnt = stats['freq'].get(d, 0)
+            bar = "█" * cnt
+            print(f"   {d}: {cnt:2d} {bar}")
+
+    print(f"\n{colored('🔥 Most frequent digits:', Fore.RED)}")
+    for d, cnt in stats['most_common']:
+        print(f"   {d}: {cnt} times")
+    print(f"\n{colored('❄️ Least frequent digits:', Fore.BLUE)}")
+    for d, cnt in stats['least_common']:
+        print(f"   {d}: {cnt} times")
+
+    print(colored(f"\n🔮 {server_label} Prediction (based on server data):", Fore.YELLOW))
+    print(f"   {pred_emoji} {prediction}")
+
+def print_recent(results, limit=10):
+    if not results:
+        return
+    print(colored(f"\n📋 Last {limit} results:", Fore.CYAN))
+    headers = ["#", "Period", "Number", "B/S", "Premium"]
+    table_data = []
+    for i, r in enumerate(results[:limit]):
+        period = str(r.get("period") or r.get("issueNumber") or r.get("issue") or r.get("periodNumber") or "-")[:12]
+        number = r.get("number", "-")
+        bs = classify(number) or "-"
+        bs_emoji = "🦁" if bs == "BIG" else "🐭" if bs == "SMALL" else ""
+        premium = str(r.get("premium") or r.get("hashValue") or r.get("blockHashtag") or "-")[:10]
+        table_data.append([i+1, period, number, f"{bs_emoji} {bs}", premium])
+
+    if HAS_TABULATE:
+        print(tabulate(table_data, headers=headers, tablefmt="grid"))
+    else:
+        print(f"{headers[0]:<3} {headers[1]:<12} {headers[2]:<6} {headers[3]:<8} {headers[4]:<10}")
+        print("-"*55)
+        for row in table_data:
+            print(f"{row[0]:<3} {row[1]:<12} {row[2]:<6} {row[3]:<8} {row[4]:<10}")
+
+def export_results(results, filename):
+    if not results:
+        print("No results to export.")
+        return
+    with open(filename, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Period", "Number", "Premium", "HashValue", "BlockHashtag", "Big/Small"])
+        for r in results:
+            period = r.get("period") or r.get("issueNumber") or r.get("issue") or r.get("periodNumber") or ""
+            number = r.get("number", "")
+            premium = r.get("premium") or ""
+            hashv = r.get("hashValue") or ""
+            block = r.get("blockHashtag") or ""
+            bs = classify(number) or ""
+            writer.writerow([period, number, premium, hashv, block, bs])
+    print(colored(f"✅ Exported {len(results)} rows to {filename}", Fore.GREEN))
+
+# ---------- Session loop (auto‑refresh) ----------
+def run_session(expiry_ms: int, game_id: str, server_mode: int):
+    cd = GAMES[game_id]["cd_time"]
+    game_emoji = GAMES[game_id]["emoji"]
+    results_cache = None
+
+    print(colored(f"\n⏳ Session active for {GAMES[game_id]['name']} (Server {server_mode}). Auto‑refreshing every {cd}s.", Fore.YELLOW))
+    print(colored("Press Ctrl+C to quit.\n", Fore.LIGHTBLACK_EX))
+
     try:
-        await app.bot.send_message(chat_id=CHANNEL_ID, text="🔍 Bot is testing channel access...")
-        logger.info("✅ Channel is accessible. Auto‑send enabled.")
-        channel_accessible = True
-    except Exception as e:
-        logger.error(f"❌ Channel access test failed: {e}")
-        logger.warning("⚠️ Auto‑send will be disabled. Please add the bot as an admin to the channel and verify the chat ID.")
-        channel_accessible = False
+        while True:
+            remaining = expiry_ms - (time.time() * 1000)
+            if remaining <= 0:
+                print(colored("\n⌛ Session expired. Exiting.", Fore.RED))
+                break
 
-# ========== MAIN ==========
-async def post_init(app: Application):
-    """Called after application is built but before polling starts."""
-    await check_channel_access(app)
-    # Schedule the periodic task every 2 seconds
-    app.job_queue.run_repeating(periodic_update, interval=2, first=2)
+            hours = int(remaining // 3600000)
+            minutes = int((remaining % 3600000) // 60000)
+            seconds = int((remaining % 60000) // 1000)
+            print(colored(f"\n⏰ Time left: {hours:02d}:{minutes:02d}:{seconds:02d}", Fore.CYAN))
 
-def main():
-    # Show banner
-    show_banner()
+            # --- Aesthetic loading spinner ---
+            stop_spinner = threading.Event()
+            spinner_thread = threading.Thread(target=spinner_task, args=(stop_spinner, "Fetching results"))
+            spinner_thread.daemon = True
+            spinner_thread.start()
 
-    # Initialize history file
-    init_history_file()
+            results = fetch_results(game_id)
 
-    # Start Flask web server in a separate thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("🌐 Flask web server started on http://localhost:5000")
+            stop_spinner.set()
+            spinner_thread.join()
 
-    # Create Telegram application with job queue
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+            if results:
+                results_cache = results
+                stats = analyze_results(results)
+                if server_mode == 1:
+                    pred = compute_prediction_system1(results)
+                else:
+                    pred = compute_prediction_system2(results)
 
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("k3", k3_command))
-    app.add_handler(CommandHandler("server", server_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+                pred_emoji = "🟢" if pred == "BIG" else "🔴" if pred == "SMALL" else "⚪"
+                telegram_msg = f"{game_emoji} {GAMES[game_id]['name']} [Server {server_mode}] Prediction: {pred} {pred_emoji}"
+                send_telegram_message(telegram_msg)
 
-    logger.info("🤖 Telegram bot started. Press Ctrl+C to stop.")
-    try:
-        # Run polling – this blocks until the bot is stopped
-        app.run_polling()
+                if stats:
+                    print_stats(stats, GAMES[game_id]['name'], game_emoji, pred, server_mode)
+                print_recent(results, limit=10)
+            else:
+                print(colored("⚠️  Could not fetch results. Retrying...", Fore.YELLOW))
+
+            time.sleep(cd)
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
-    except Exception as e:
-        logger.error(f"Polling error: {e}")
+        print(colored("\n👋 Session terminated by user.", Fore.YELLOW))
+        if results_cache:
+            ans = input("Export results before quitting? (y/n): ").strip().lower()
+            if ans == 'y':
+                filename = f"wingo_{game_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                export_results(results_cache, filename)
+
+# ---------- Main with argument parsing ----------
+def main():
+    parser = argparse.ArgumentParser(description="BigWin Wingo Predictor")
+    parser.add_argument("game", nargs="?", help="Game ID: 1 or 30")
+    parser.add_argument("server", nargs="?", help="'/sc' for Server 2 (Markov chain)")
+    args = parser.parse_args()
+
+    # Determine server mode
+    server_mode = 1
+    if args.server and args.server.lower() == '/sc':
+        server_mode = 2
+    elif args.game and args.game.lower() == '/sc':  # allow game to be omitted
+        server_mode = 2
+        args.game = None
+
+    print(get_banner(server_mode))
+    print(colored(f"🎰 BigWin Wingo CLI – Server {server_mode} Active (No Password)", Fore.GREEN))
+    print("Available games:")
+    for gid, info in GAMES.items():
+        print(f"  {gid}: {info['emoji']} {info['name']}")
+
+    # Get game ID
+    game_id = args.game
+    if not game_id:
+        game_id = input("\nSelect game (1 or 30): ").strip()
+    if game_id not in GAMES:
+        print(colored("Invalid game selection.", Fore.RED))
+        sys.exit(1)
+
+    expiry = get_session_expiry()
+    print(colored("✅ Starting auto‑refresh...", Fore.GREEN))
+    run_session(expiry, game_id, server_mode)
 
 if __name__ == "__main__":
     main()
