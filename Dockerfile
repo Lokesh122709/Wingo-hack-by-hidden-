@@ -1,16 +1,20 @@
-FROM python:3.10-slim
+# Use official Python slim image
+FROM python:3.9-slim
 
+# Set working directory
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
+# Copy requirements first (for better caching)
 COPY requirements.txt .
+
+# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py .
+# Copy the main script
+COPY bigwin_wingo.py .
 
-EXPOSE 5000
+# Make the script executable
+RUN chmod +x bigwin_wingo.py
 
-CMD ["python", "bot.py"]
+# Run the script (arguments can be passed via docker run)
+ENTRYPOINT ["python", "/app/bigwin_wingo.py"]
