@@ -1,8 +1,3 @@
-aiohttp
-flask
-python-telegram-bot
+requests
+tabulate
 colorama
-cfonts
-apscheduler
-pytz
-openai==0.28.0
