@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 BigWin Wingo CLI – Choose prediction server (1 or 2)
-Aesthetic loading spinner + Telegram bot integration.
+Aesthetic loading spinner + Telegram bot integration + startup banner.
 NO PASSWORD REQUIRED – for deployment.
 
 Usage:
-    python script.py [game_id] [/sc]
+    python script.py <game_id> [/sc]
 
-    game_id : 1 or 30 (optional, will prompt if missing)
+    game_id : 1 or 30 (required)
     /sc     : use Server 2 (Markov chain), default is Server 1
 """
 
@@ -67,8 +67,9 @@ def send_telegram_message(text: str):
             print(f"{Fore.YELLOW}⚠️ Telegram send failed: {e}{Style.RESET_ALL}")
     threading.Thread(target=_send, daemon=True).start()
 
-# ---------- Banner (with server indicator) ----------
-def get_banner(server_mode):
+# ---------- Banners ----------
+def get_colored_banner(server_mode):
+    """Banner with ANSI color codes for console."""
     base = f"""
 {Fore.CYAN}
     ██╗  ██╗██╗██████╗ ██████╗ ███████╗███╗   ██╗
@@ -89,9 +90,28 @@ def get_banner(server_mode):
     server_text = f"{Fore.YELLOW}⚡ Server {server_mode} Active{Style.RESET_ALL}"
     return base + "\n" + server_text + "\n"
 
-# ---------- Spinner for aesthetic loading ----------
+def get_plain_banner(server_mode):
+    """Plain text banner for Telegram (no color codes)."""
+    base = """
+    ██╗  ██╗██╗██████╗ ██████╗ ███████╗███╗   ██╗
+    ██║  ██║██║██╔══██╗██╔══██╗██╔════╝████╗  ██║
+    ███████║██║██║  ██║██║  ██║█████╗  ██╔██╗ ██║
+    ██╔══██║██║██║  ██║██║  ██║██╔══╝  ██║╚██╗██║
+    ██║  ██║██║██████╔╝██████╔╝███████╗██║ ╚████║
+    ╚═╝  ╚═╝╚═╝╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝
+                            x
+        █████╗ ██╗     ██████╗ ██╗  ██╗ █████╗
+       ██╔══██╗██║     ██╔══██╗██║  ██║██╔══██╗
+       ███████║██║     ██████╔╝███████║███████║
+       ██╔══██║██║     ██╔═══╝ ██╔══██║██╔══██║
+       ██║  ██║███████╗██║     ██║  ██║██║  ██║
+       ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝
+"""
+    server_text = f"⚡ Server {server_mode} Active"
+    return base + "\n" + server_text + "\n"
+
+# ---------- Spinner ----------
 def spinner_task(stop_event, message="Fetching results"):
-    """Display a spinner until stop_event is set."""
     spinner = itertools.cycle(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
     color = Fore.CYAN if HAS_COLORAMA else ""
     reset = Style.RESET_ALL if HAS_COLORAMA else ""
@@ -111,23 +131,16 @@ FIREBASE_CONFIG = {
     "databaseURL": "https://ck30-35e97-default-rtdb.europe-west1.firebasedatabase.app"
 }
 
-LOGIN_CONFIG = {
-    "apiKey": "AIzaSyBynBT5W_C6rNVEUB4j7ABiJQeSfQGU4Mo",
-    "databaseURL": "https://lotteryoo-default-rtdb.europe-west1.firebasedatabase.app"
-}
-
 GAMES = {
     "1": {
         "name": "WinGo1",
         "firebase_path": "bigwinwingo1/default",
-        "static_key": "LOKESH124",
         "cd_time": 60,
         "emoji": "🎲"
     },
     "30": {
         "name": "WinGo30",
         "firebase_path": "bigwin/default",
-        "static_key": "LOKESH123",
         "cd_time": 30,
         "emoji": "🎰"
     }
@@ -151,7 +164,6 @@ def fetch_results(game_id: str) -> Optional[List[Dict]]:
     return None
 
 def get_session_expiry() -> int:
-    """Return a far‑future timestamp (100 years from now)."""
     return int((datetime.now() + timedelta(days=36500)).timestamp() * 1000)
 
 # ---------- Results processing ----------
@@ -307,7 +319,7 @@ def export_results(results, filename):
             writer.writerow([period, number, premium, hashv, block, bs])
     print(colored(f"✅ Exported {len(results)} rows to {filename}", Fore.GREEN))
 
-# ---------- Session loop (auto‑refresh) ----------
+# ---------- Session loop ----------
 def run_session(expiry_ms: int, game_id: str, server_mode: int):
     cd = GAMES[game_id]["cd_time"]
     game_emoji = GAMES[game_id]["emoji"]
@@ -328,7 +340,6 @@ def run_session(expiry_ms: int, game_id: str, server_mode: int):
             seconds = int((remaining % 60000) // 1000)
             print(colored(f"\n⏰ Time left: {hours:02d}:{minutes:02d}:{seconds:02d}", Fore.CYAN))
 
-            # --- Aesthetic loading spinner ---
             stop_spinner = threading.Event()
             spinner_thread = threading.Thread(target=spinner_task, args=(stop_spinner, "Fetching results"))
             spinner_thread.daemon = True
@@ -366,34 +377,29 @@ def run_session(expiry_ms: int, game_id: str, server_mode: int):
                 filename = f"wingo_{game_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                 export_results(results_cache, filename)
 
-# ---------- Main with argument parsing ----------
+# ---------- Main ----------
 def main():
     parser = argparse.ArgumentParser(description="BigWin Wingo Predictor")
-    parser.add_argument("game", nargs="?", help="Game ID: 1 or 30")
+    parser.add_argument("game", help="Game ID: 1 or 30")
     parser.add_argument("server", nargs="?", help="'/sc' for Server 2 (Markov chain)")
     args = parser.parse_args()
 
-    # Determine server mode
     server_mode = 1
     if args.server and args.server.lower() == '/sc':
         server_mode = 2
-    elif args.game and args.game.lower() == '/sc':  # allow game to be omitted
-        server_mode = 2
-        args.game = None
 
-    print(get_banner(server_mode))
-    print(colored(f"🎰 BigWin Wingo CLI – Server {server_mode} Active (No Password)", Fore.GREEN))
-    print("Available games:")
-    for gid, info in GAMES.items():
-        print(f"  {gid}: {info['emoji']} {info['name']}")
-
-    # Get game ID
     game_id = args.game
-    if not game_id:
-        game_id = input("\nSelect game (1 or 30): ").strip()
     if game_id not in GAMES:
-        print(colored("Invalid game selection.", Fore.RED))
+        print(colored(f"❌ Invalid game ID: {game_id}. Must be 1 or 30.", Fore.RED))
         sys.exit(1)
+
+    # Print colored banner to console
+    print(get_colored_banner(server_mode))
+    print(colored(f"🎰 BigWin Wingo CLI – Server {server_mode} Active (No Password)", Fore.GREEN))
+
+    # Send plain banner to Telegram
+    plain_banner = get_plain_banner(server_mode)
+    send_telegram_message(plain_banner)
 
     expiry = get_session_expiry()
     print(colored("✅ Starting auto‑refresh...", Fore.GREEN))
